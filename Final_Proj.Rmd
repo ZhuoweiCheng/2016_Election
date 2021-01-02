@@ -1,0 +1,832 @@
+---
+title: "231 Final Project"
+author: "Jing Xu & Zhuowei Cheng"
+output: pdf_document
+---
+
+```{r setup, warning=F, message=F, cache=T}
+Packages <- c("dplyr", "ggplot2", "knitr", "readr","tidyverse","plyr",
+              "tree","class", "rpart", "maptree",
+              "ROCR","lattice","ggridges","superheat","randomForest",
+              "e1071", "imager","ggpubr","kableExtra","ggmap","maps",
+              "Rtsne","NbClust","glmnet","pander","plotmo","Hmisc",
+              "randomForest", "gbm")
+invisible(lapply(Packages, library, character.only = TRUE))
+```
+
+# Data
+```{r data, warning=F, message=F, cache=T}
+setwd("~/Documents/2018 Fall/PSTAT 231/Homework/Final proj")
+## read data and convert candidate from string to factor
+election.raw <- read_delim("data/election/election.csv", delim = ",") %>%
+  mutate(candidate=as.factor(candidate))
+census_meta <- read_delim("data/census/metadata.csv", delim = ";", 
+                          col_names = FALSE) 
+census <- read_delim("data/census/census.csv", delim = ",") 
+```
+
+```{r, warning=F, message=F, cache=T}
+kable(election.raw %>% filter(county == "Los Angeles County"))  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width=FALSE)
+```
+
+# 4 Remove rows with fips=2000
+```{r 4, warning=F, message=F, cache=T}
+# as.tibble(election.raw %>% filter(fips == "2000"))
+# as.tibble(election.raw %>% filter(fips == "AK"))
+election.raw <- election.raw %>% filter(fips != "2000") 
+dim(election.raw)
+```
+
+The 6 rows with `fips` = 6 represent the votes in Alaska state not in the county level, which are replicates of the 6 rows with `fips` = "AK". So they should be deleted. \par
+
+# 5 Split election dataset
+```{r 5, warning=F, message=F, cache=T}
+election_federal <- election.raw %>% filter(fips=='US')
+election_state <- election.raw %>% filter(is.na(county) & fips!='US')
+election <- election.raw %>% filter(!is.na(county))
+```
+
+# 6 Presidential candidates
+```{r 6, warning=F, message=F, cache=T}
+length(election_federal$candidate)
+# log is better than the original scale
+p2 <- ggplot(data=election_federal, aes(x=candidate, y=log(votes)))+
+  geom_bar(stat="identity", width=0.5, fill="steelblue") +
+  theme_minimal() +
+  labs(x="Candidates")
+p2 + coord_flip()
+ggsave("test.png")
+```
+
+There 32 candidates in the 2016 election.\par 
+
+# 7 County and state winner
+```{r 7, warning=F, message=F, cache=T}
+county_winner <- election %>% group_by(fips) %>% 
+  dplyr::mutate(tot=sum(votes),pc=votes/tot) %>% top_n(1, pc)
+state_winner <- election_state %>% group_by(fips) %>% 
+  dplyr::mutate(tot=sum(votes),pc=votes/tot) %>% top_n(1, pc)
+```
+
+# Visualization
+```{r, warning=F, message=F, cache=T}
+states <- map_data("state")
+ggplot(data = states) + 
+  geom_polygon(aes(x = long, y = lat, fill = region, group = group), color = "white") + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE)  
+```
+
+# 8 County-level map
+```{r 8, warning=F, message=F, cache=T}
+counties = map_data("county")
+ggplot(data = counties) + 
+  geom_polygon(aes(x = long, y = lat, fill = subregion, group = group)) + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE) 
+```
+
+# 9 State winner map
+```{r 9, warning=F, message=F, cache=T}
+# left join tables
+states <- states%>%mutate(fips = state.abb[match(region, tolower(state.name))])
+state_join <- left_join(states, state_winner, by="fips")
+# plot
+ggplot(data = state_join) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group), 
+               color = "white")+ coord_fixed(1.3) +
+  scale_fill_manual(values = c("red", "blue"))
+```
+
+# 10 County winner map
+```{r 10, warning=F, message=F, cache=T}
+# pulling out info from county.fips
+county.fips<-separate(maps::county.fips, polyname, c("region","subregion"), sep = ",")
+# left joins
+county_join <- left_join(counties, county.fips,
+                         by=c("region"="region","subregion"="subregion"))
+county_join$fips <- as.character(county_join$fips)
+county_join <- left_join(county_join, county_winner, by="fips")
+# plot
+ggplot(data = county_join) + 
+  geom_polygon(aes(x = long, y = lat, fill = candidate, group = group)) + 
+  coord_fixed(1.3) +
+  scale_fill_manual(values = c("red", "blue"))
+```
+
+# 11 Choropleth map
+```{r 11, warning=F, message=F, cache=T}
+# choropleth map
+# race: white supports Trump
+county_race <- census %>% dplyr::select(State:TotalPop,Hispanic:Pacific) %>%
+  group_by(State,County) %>%
+  dplyr::summarize(tot=sum(TotalPop), Hispanic=sum(TotalPop*Hispanic/100,na.rm=T),
+                   White=sum(TotalPop*White/100,na.rm=T),
+                   Black=sum(TotalPop*Black/100,na.rm=T),
+                   Native=sum(TotalPop*Native/100,na.rm=T),
+                   Asian=sum(TotalPop*Asian/100,na.rm=T),
+                   Pacific=sum(TotalPop*Pacific/100,na.rm=T))
+county_race <- county_race %>% dplyr::mutate(Hispanic=Hispanic/tot,
+                                             White=White/tot,
+                                             Black=Black/tot,
+                                             Native=Native/tot,
+                                             Asian=Asian/tot,
+                                             Pacific=Pacific/tot)
+county_race$State <- tolower(county_race$State)
+county_race$County <- tolower(county_race$County)
+
+# join
+race_join <- left_join(counties,county_race,by=c("region"="State","subregion"="County"))
+
+# county race map
+ggplot(race_join, aes(x = long, y = lat, group = group, fill = White)) +
+    geom_polygon() +
+    coord_equal() +
+    coord_fixed(1.3)+ 
+  scale_fill_gradient(low="blue", high="red")
+# county population map
+ggplot(race_join, aes(x = long, y = lat, group = group, fill = log(tot))) +
+    geom_polygon() +
+    coord_equal() +
+    coord_fixed(1.3)+ 
+  scale_fill_gradient(low="red", high="blue")
+```
+
+# 12 Aggregate census data into county-level
+```{r 12, warning=F, message=F, cache=T}
+# census.del
+census.del <- census %>% filter(complete.cases(census)==T) %>%
+  mutate(Men=Men/TotalPop*100, Employed=Employed/TotalPop*100, 
+         Citizen=Citizen/TotalPop*100,
+         Minority=Hispanic+Black+Native+Asian+Pacific) %>%
+  dplyr::select(-c(Walk, PublicWork, Construction, Women, Hispanic,
+            Black, Native, Asian, Pacific, White))
+
+# census.subct
+census.subct <- census.del %>% group_by(State, County) %>% 
+  add_tally(TotalPop) %>% mutate(weight=TotalPop/n)
+colnames(census.subct)[colnames(census.subct)=="n"] <- "CountyTotal"
+
+# census.ct
+census.ct <- census.subct %>% group_by(State,County) %>%
+  dplyr::summarise_at(vars(Men:Minority), funs(sum(.*weight)))
+```
+
+# Dimensionality Reduction
+
+# 13 PCA
+```{r 13, warning=F, message=F, cache=T}
+# county-level
+pc_census.ct = prcomp(census.ct %>% ungroup() %>%
+                        dplyr::select(Men:Minority), center = T, scale = T)
+ct.pc <- data.frame(pc_census.ct$x[,1:2])
+# features with the three largest value of PC1
+ct.phi <- data.frame(pc_census.ct$rotation) # the first col of rotation mat
+row.names(ct.phi)[order(abs(ct.phi[,1]),decreasing=T)[1:3]]
+# opposite signs
+row.names(ct.phi)[ct.phi[,1]>0]
+row.names(ct.phi)[ct.phi[,1]<0]
+
+# subcounty-level
+pc_census.subct = prcomp(census.subct %>% ungroup() %>%
+                        dplyr::select(Men:Minority), center = T, scale = T)
+subct.pc <- pc_census.subct$x[,1:2]
+# features with largest value of PC1
+subct.phi <- data.frame(pc_census.subct$rotation) # the first col of rotation mat
+row.names(subct.phi)[order(abs(subct.phi[,1]),decreasing=T)[1:3]]
+# opposite signs
+row.names(subct.phi)[subct.phi[,1]>0]
+row.names(subct.phi)[subct.phi[,1]<0]
+```
+
+# 14 The minimal number of PC's to capture 90% variance
+```{r 14, warning=F, message=F, cache=T}
+# county
+pc_var = pc_census.ct$sdev^2
+pve <-  pc_var/sum(pc_var)
+which(cumsum(pve)>0.9)[1]
+# plot of PVE and cumulative PVE
+par(mfrow=c(1, 2))
+plot(pve, type="l", lwd=3,
+     xlab="Number of PC's", ylab="Explained variance")
+plot(cumsum(pve), type="l", lwd=3, 
+     xlab="Number of PC's", ylab="Cumulative explained variance")
+
+# sub-county
+pc_var = pc_census.subct$sdev^2
+pve <-  pc_var/sum(pc_var)
+which(cumsum(pve)>0.9)[1]
+# plot of PVE and cumulative PVE
+par(mfrow=c(1, 2))
+plot(pve, type="l", lwd=3,
+      xlab="Number of PC's", ylab="Explained variance")
+plot(cumsum(pve), type="l", lwd=3,
+     xlab="Number of PC's", ylab="Cumulative explained variance")
+```
+
+The numbers of minimum number of PCs needed to capture 90% of the variance for both the county and sub-county analyses are 13 and 14, respectively. \par
+
+# Clustering
+
+# 15 Hierarchical clustering
+```{r 15, warning=F, message=F, cache=T}
+# using org data
+# Standardize the variables by subtracting mean and divided by standard deviation
+census.ct_s <- scale(census.ct %>% ungroup() %>%
+                       dplyr::select(Men:Minority), center=T, scale=T)
+county.dist <- dist(census.ct_s)
+set.seed(1)
+county.hclust = hclust(county.dist) 
+# keep 10 clusters
+cluster_lbl <- cutree(county.hclust, k = 10)
+
+# using PC1-2
+# centering and scaling 
+pc_census.ct_s <- scale(pc_census.ct$x[,1:2], center=T, scale=T)
+county.pc.dist <- dist(pc_census.ct_s)
+set.seed(1)
+county.pc.hclust = hclust(county.pc.dist) 
+# keep 10 clusters
+cluster_lbl2 <- cutree(county.pc.hclust, k = 10)
+
+#  San Mateo County
+row <- which(census.ct $County=="San Mateo") 
+# county_winner %>% filter(county=="San Mateo County") %>% 
+#   select(candidate) 
+# San Mateo chose Hillary Cliton
+
+# County in the same cluter with San Mateo using original data 
+census.ct$County[cluster_lbl==cluster_lbl[row]]
+# County in the same cluter with San Mateo using PC1-2 
+census.ct$County[cluster_lbl2==cluster_lbl2[row]]
+
+# the spatial pattern of counties in the same cluster
+# join clustering result with counties map
+county_cluster <- census.ct
+county_cluster$State <- tolower(county_cluster$State)
+county_cluster$County <- tolower(county_cluster$County)
+county_cluster$Cluster_lbl <- as.factor(cluster_lbl)
+temp <- left_join(counties,county_cluster,
+                      by=c("region"="State","subregion"="County"))
+p1 <- ggplot(temp, aes(x = long, y = lat, group = group, fill = Cluster_lbl)) +
+    geom_polygon() +
+    coord_equal() +
+    coord_fixed(1.3)
+
+# the proportion that county has the same candidate as San Mateo 
+# # left join county_cluster with county_winner
+# county_cluster <- county_cluster %>%
+#   mutate(fips = state.abb[match(State, tolower(state.name))])
+# county_cluster <- county_cluster %>% mutate(County=paste(capitalize(County),"County"))
+# # temp contains cluster lbl and also candidate info
+# temp <- left_join(county_cluster, county_winner, by=c("fips"="state", "County"="county"))
+# candidate <- table(temp$candidate[which(temp$Cluster_lbl==cluster_lbl[row])])
+# # Trump: 58 vs Clinton: 38 pec: 0.3958
+
+
+# the spatial pattern of counties in the same cluster
+county_cluster$Cluster_lbl <- as.factor(cluster_lbl2)
+temp <- left_join(counties,county_cluster,
+                      by=c("region"="State","subregion"="County"))
+p2 <- ggplot(temp, aes(x = long, y = lat, group = group, fill = Cluster_lbl)) +
+    geom_polygon() +
+    coord_equal() +
+    coord_fixed(1.3)
+p1
+p2
+# ggarrange(p1, p2, ncol=2, nrow=1)
+
+# the proportion that county has the same candidate as San Mateo
+# # left join county_cluster with county_winner
+# temp <- left_join(county_cluster, county_winner, by=c("fips"="state", "County"="county"))
+# candidate <- table(temp$candidate[which(temp$Cluster_lbl==cluster_lbl[row])])
+# # Trump: 127 vs Clinton: 69 pec: 0.3520
+```
+
+# Classification
+Join winner data with census data:
+```{r, eval=T, warning=F, message=F, cache=T}
+tmpwinner <- county_winner %>% ungroup %>%
+  mutate(state = state.name[match(state, state.abb)]) %>% ## state abbreviations
+  mutate_at(vars(state, county), tolower) %>%     ## to all lowercase
+  mutate(county = gsub(" county| columbia| city| parish", "", county))  
+## remove suffixes
+tmpcensus <- census.ct %>% ungroup() %>% mutate_at(vars(State, County), tolower)
+
+election.cl <- tmpwinner %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% 
+  na.omit
+
+## save meta information
+election.meta <- election.cl %>% dplyr::select(c(county, fips, state, votes, pc, tot))
+
+## save predictors and class labels
+election.cl = election.cl %>% dplyr::select(-c(county, fips, state, votes, pc, tot))
+```
+
+Join important PC's with census data:
+```{r, warning=F, message=F, cache=T}
+# using the first 13 PC's (explaining 90% variance)
+PC <- data.frame(pc_census.ct$x[,1:13])
+PC <- PC %>% mutate(state=tmpcensus$State, county=tmpcensus$County)
+
+election.cl.pc <- tmpwinner %>%
+  left_join(PC, by = c("state"="state", "county"="county")) %>% 
+  na.omit
+
+## save PC predictors and class labels
+election.cl.pc <- election.cl.pc[,-c(1,2,4:7)]
+```
+
+If using original data to fit classifiers, partition data into 80% training and 20% testing:
+```{r, eval=T, warning=F, message=F, cache=T}
+set.seed(10) 
+# using original data
+n <- nrow(election.cl)
+in.trn <- sample.int(n, 0.8*n) 
+trn.cl <- election.cl[ in.trn,]
+tst.cl <- election.cl[-in.trn,]
+```
+
+If using PC's to fit classifier, partition PC data into 80% training and 20% testing:
+```{r, eval=F, warning=F, message=F, cache=T}
+set.seed(10) 
+# using PC's for classification
+# use the following to generate trn.cl and tst.cl
+n <- nrow(election.cl.pc)
+in.trn <- sample.int(n, 0.8*n)
+trn.cl <- election.cl.pc[ in.trn,]
+tst.cl <- election.cl.pc[-in.trn,]
+```
+
+Using the following code, define 10 cross-validation folds:
+```{r, eval=T, warning=F, message=F, cache=T}
+set.seed(20) 
+nfold <- 10
+folds <- sample(cut(1:nrow(trn.cl), breaks=nfold, labels=FALSE))
+```
+
+Using the following error rate function:
+```{r}
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))
+}
+records = matrix(NA, nrow=9, ncol=2)
+colnames(records) = c("Train.error","Test.error")
+rownames(records) = c("Tree","Logistic","LASSO","KNN","LDA","QDA","SVM",
+                      "Random forest","Boosting")
+```
+
+Generate bootstrap dataset:
+```{r , warning=F, message=F, cache=T}
+# define bootstrap fuction
+bootstrapfunc <- function(data){
+  bootresults<-data.frame()
+  n <- dim(data)[1]
+  i <- sample(x = 1:n, size = n, replace =T)
+  bootresults <- data[i,]
+  return(bootresults)
+}
+# generate bootstrap data
+set.seed(1)
+n.bootstrap <- 200
+bootstrap1000 <- sapply(1:n.bootstrap, function(i) bootstrapfunc(trn.cl))
+test.error.bootstrap <- data.frame(matrix(0,nrow=n.bootstrap,ncol=9))
+colnames(test.error.bootstrap) <- c("Tree","Logistic","LASSO","KNN","LDA","QDA",
+                                    "SVM","Random forest","Boosting")
+```
+
+Define the criteria for finding "purple" county:  
+```{r}
+# the prob of Hillary Clinton being a winner is within [lowerb, upperb]
+lowerb <- 0.48
+upperb <- 0.52
+```
+
+# 16 Decision tree
+```{r 16, warning=F, message=F, cache=T}
+# fit the tree
+set.seed(1)
+tree_parameters <- tree.control(nobs=nrow(trn.cl), minsize=10, mindev=1e-3)
+tree <- tree(candidate ~., data = trn.cl, 
+                 control=tree_parameters)
+draw.tree(tree, nodeinfo = T, cex=0.2)
+title("Original tree") 
+
+# prune the tree using cross validation
+set.seed(1)
+cv <- cv.tree(tree, rand=folds, FUN=prune.misclass, K=10)
+cv.plot <- data.frame(size=cv$size, misclassification=cv$dev)
+best.size <- cv.plot[order(cv.plot$misclassification,cv.plot$size),]$size[1] 
+#7 using original data # 67 using PC's
+tree_pruned <- prune.tree(tree, best=best.size)
+draw.tree(tree_pruned, nodeinfo = T, cex=0.5)
+title("Pruned tree")
+
+# prediction error
+predTrain <- predict(tree_pruned, trn.cl, type="class")
+predTest <- predict(tree_pruned, tst.cl, type="class")
+train.error =calc_error_rate(predTrain, trn.cl$candidate)
+test.error =calc_error_rate(predTest, tst.cl$candidate)
+records[1,1] <- train.error
+records[1,2] <- test.error
+
+# purple county
+predTest <- predict(tree_pruned, election.cl, type="vector") # prob
+predTest <-predTest[,"Hillary Clinton"]
+predTest[which(predTest>=lowerb && predTest<=upperb)] # none
+
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+```{r, eval=F, warning=F, message=F, cache=T}
+# bootstrap for test error statistics
+for (i in 1:n.bootstrap){
+  tree_pruned <- prune.tree(tree(candidate ~., data = data.frame(bootstrap1000[,i]),
+               control=tree_parameters), best=best.size)
+  predTest <- predict(tree_pruned, tst.cl, type="class")
+  test.error.bootstrap$Tree[i] = calc_error_rate(predTest, tst.cl$candidate)
+}
+```
+
+# 17 Logistic regression
+```{r 17, warning=F, cache=T, message=F}
+logit <- glm(candidate~., data=trn.cl,
+                  family="binomial")
+summary(logit)
+# prediction error
+# using majority rule here
+predTrain <- ifelse(predict(logit, type = "response")>0.5, 
+                    "Hillary Clinton", "Donald Trump")
+predTest <- ifelse(predict(logit, tst.cl, type = "response")>0.5, 
+                    "Hillary Clinton", "Donald Trump")
+train.error =calc_error_rate(predTrain, trn.cl$candidate)
+test.error =calc_error_rate(predTest, tst.cl$candidate)
+records[2,1] <- train.error
+records[2,2] <- test.error
+
+# purple county
+predTest <- predict(logit, election.cl, type="response") # prob of Clinton
+predTest[which(predTest>=lowerb && predTest<=upperb)] # none
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+```{r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  logit <- glm(candidate~., data=data.frame(bootstrap1000[,i]), family="binomial")
+  predTest <- ifelse(predict(logit, tst.cl, type = "response")>0.5,
+                    "Hillary Clinton", "Donald Trump")
+  test.error.bootstrap$Logistic[i] = calc_error_rate(predTest, tst.cl$candidate)
+}
+```
+
+# 18 LASSO 
+```{r 18, warning=F, message=F, cache=T}
+set.seed(1)
+y <- ifelse(trn.cl$candidate=="Hillary Clinton", 1, 0)
+cv.out.lasso = cv.glmnet(model.matrix(candidate~., trn.cl)[,-1], y,
+                         family="binomial",alpha = 1, 
+                         lambda=c(1, 5, 10, 50)*0.0001) 
+bestlam = cv.out.lasso$lambda.min
+# non-zero coef
+LASSO <- glmnet(model.matrix(candidate~., trn.cl)[,-1], y, family="binomial",
+                alpha=1, lambda=bestlam)
+predict(LASSO, s = bestlam, exact = T, type = 'coefficients')[1:25,]
+# using PC
+# predict(LASSO, s = bestlam, exact = T, type = 'coefficients')[1:14,]
+# non-zero coefficients very similar to logit
+
+# prediction error
+predTrain=predict(LASSO, newx=model.matrix(candidate~., trn.cl)[,-1], type="class")
+predTest=predict(LASSO, newx=model.matrix(candidate~., tst.cl)[,-1], type="class")
+predTrain <- ifelse(predTrain==0, "Donald Trump", "Hillary Clinton")
+predTest <- ifelse(predTest==0, "Donald Trump", "Hillary Clinton")
+train.error =calc_error_rate(predTrain, trn.cl$candidate)
+test.error =calc_error_rate(predTest, tst.cl$candidate)
+records[3,1] <- train.error
+records[3,2] <- test.error
+
+# purple county
+predTest <- predict(LASSO, newx=model.matrix(candidate~., election.cl)[,-1], 
+                         type="response") # prob of Clinton
+predTest[which(predTest>=lowerb && predTest<=upperb)] # none
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+```{r, eval=F,warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  y <- ifelse(data.frame(bootstrap1000[,i])$candidate=="Hillary Clinton", 1, 0)
+  LASSO <- glmnet(model.matrix(candidate~., data.frame(bootstrap1000[,i]))[,-1],
+                  y, family="binomial", alpha=1, lambda=bestlam)
+  predTest=predic t(LASSO, newx=model.matrix(candidate~., tst.cl)[,-1], type="class")
+  predTest <- ifelse(predTest==0, "Donald Trump", "Hillary Clinton")
+  test.error.bootstrap$LASSO[i] = calc_error_rate(predTest, tst.cl$candidate)
+}
+```
+
+# 19 ROC curves
+```{r 19, warning=F, message=F, cache=T}
+# positive: Hillary Clinton
+y <- ifelse(tst.cl$candidate=="Hillary Clinton", 1, 0) 
+# predicted prob
+predict.tree <- predict(tree_pruned, tst.cl, type="vector")
+predict.logit <- predict(logit, tst.cl, type="response")
+predict.lasso <- predict(LASSO, newx=model.matrix(candidate~., tst.cl)[,-1], 
+                         type="response")
+# ROC objs
+pred.tree <- prediction(predict.tree[,"Hillary Clinton"], y) 
+perf.tree <- performance(pred.tree, "tpr", "fpr") 
+pred.logit <- prediction(predict.logit, y) 
+perf.logit <- performance(pred.logit, "tpr", "fpr") 
+pred.lasso <- prediction(predict.lasso, y) 
+perf.lasso <- performance(pred.lasso, "tpr", "fpr")
+# plot
+plot.roc <- data.frame(x=perf.tree@x.values[[1]], 
+                       y=perf.tree@y.values[[1]])
+plot.roc2 <- data.frame(x=perf.logit@x.values[[1]], 
+                        y= perf.logit@y.values[[1]])
+plot.roc3 <- data.frame(x=perf.lasso@x.values[[1]], 
+                        y= perf.lasso@y.values[[1]])
+
+ggplot() +
+  geom_point(data=plot.roc, aes(x, y), color="grey54") +
+  geom_line(data=plot.roc, aes(x, y, color="Decision Tree")) +
+  geom_point(data=plot.roc2, aes(x, y), color="grey80") +
+  geom_line(data=plot.roc2, aes(x, y, color="Logistic Reg")) + 
+  geom_point(data=plot.roc3, aes(x, y), color="grey100") +
+  geom_line(data=plot.roc3, aes(x, y, color="LASSO logistic")) + 
+  ggtitle("ROC") + 
+  theme(plot.title = element_text(size=18, hjust = 0.5)) +
+  ylab("True Positive") +
+  xlab("False Psitive") +
+    scale_colour_manual("", breaks = c("Decision Tree", "Logistic Reg", "LASSO logistic"),
+                      values = c("blue", "red", "green"))
+# compute areas below both ROVs
+(AUC.tree = performance(pred.tree, "auc")@y.values)
+(AUC.logit = performance(pred.logit, "auc")@y.values)
+(AUC.lasso = performance(pred.lasso, "auc")@y.values)
+```
+
+# 20 Taking it further
+
+# Other classifiers
+## KNN 
+```{r 20-1-1, warning=F, message=F, cache=T}
+# select the number of neighbors
+set.seed(1)
+do.chunk <- function(chunkid, folddef, Xdat, Ydat, k){
+  
+  train = (folddef!=chunkid)
+  
+  Xtr = Xdat[train,]
+  Ytr = Ydat[train]
+  
+  Xvl = Xdat[!train,]
+  Yvl = Ydat[!train]
+
+  ## get classifications for current training chunks
+  predYtr = knn(train = Xtr, test = Xtr, cl = Ytr, k = k)
+  
+  ## get classifications for current test chunk
+  predYvl = knn(train = Xtr, test = Xvl, cl = Ytr, k = k)
+  
+  data.frame(NumNeighbors = k, fold = chunkid, 
+             train.error =calc_error_rate(predYtr, Ytr),
+             val.error = calc_error_rate(predYvl, Yvl))
+}
+
+kvec = c(1, c(seq(0,50,by=5))[-1])
+# knn predicts factors
+KNN.result <- ldply(kvec, function(z) ldply(1:10, function(x) do.chunk(x, folds, trn.cl[-1], trn.cl$candidate, z)))
+min.val.error <- KNN.result %>% 
+  group_by(NumNeighbors) %>% 
+  dplyr::summarise(AvgValError=mean(val.error)) %>%
+  filter(AvgValError==min(AvgValError))
+best.kfold <- min.val.error$NumNeighbors # 15 # using PC's also 15
+
+# use the best k 
+set.seed(1)
+# training error
+predYtr = knn(train = trn.cl[-1], test = trn.cl[-1], cl = trn.cl$candidate, k = best.kfold)
+train.error =calc_error_rate(predYtr, trn.cl$candidate)
+# test error
+predYtest = knn(train = trn.cl[-1], test = tst.cl[-1], cl = trn.cl$candidate, k = best.kfold)
+test.error =calc_error_rate(predYtest, tst.cl$candidate)
+records[4,1] <- train.error
+records[4,2] <- test.error
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+``` {r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  predYtest = knn(train = data.frame(bootstrap1000[,i])[-1], test = tst.cl[-1],
+                  cl = data.frame(bootstrap1000[,i])$candidate, k = best.kfold)
+  test.error.bootstrap$KNN[i] = calc_error_rate(predYtest, tst.cl$candidate)
+}
+```
+
+## LDA
+```{r 20-1-2, warning=F, message=F, cache=T}
+fit.lda <- MASS::lda(candidate~., data=trn.cl, CV=F)
+predYtr <-  predict(fit.lda, data=trn.cl)$class
+train.error =calc_error_rate(predYtr, trn.cl$candidate)
+predYtest <- predict(fit.lda, newdata=tst.cl)$class
+test.error =calc_error_rate(predYtest, tst.cl$candidate)
+records[5,1] <- train.error
+records[5,2] <- test.error
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+```{r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  fit.lda <- MASS::lda(candidate~., data=data.frame(bootstrap1000[,i]), CV=F)
+  predYtest <- predict(fit.lda, newdata=tst.cl)$class
+  test.error.bootstrap$LDA[i] = calc_error_rate(predYtest, tst.cl$candidate)
+}
+```
+
+
+## QDA
+```{r 20-1-3, warning=F, message=F, cache=T}
+fit.qda <- MASS::qda(factor(candidate)~., data=trn.cl, CV=F)
+predYtr <-  predict(fit.qda, data=trn.cl)$class
+train.error =calc_error_rate(predYtr, factor(trn.cl$candidate))
+predYtest <- predict(fit.qda, newdata=tst.cl)$class
+test.error =calc_error_rate(predYtest, factor(tst.cl$candidate))
+records[6,1] <- train.error
+records[6,2] <- test.error
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+```{r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  fit.qda <- MASS::qda(factor(candidate)~., data=data.frame(bootstrap1000[,i]), CV=F)
+  predYtest <- predict(fit.qda, newdata=tst.cl)$class
+  test.error.bootstrap$QDA[i] = calc_error_rate(predYtest, factor(tst.cl$candidate))
+}
+```
+
+## SVM
+```{r 20-1-4, warning=F, message=F, cache=T}
+# choose the best cost para
+set.seed(1)
+tune.out <- tune(svm, candidate~., data=trn.cl, kernel="radial", 
+                 ranges=list(cost=c(0.001, 0.01, 0.1,1,5,10,100)))
+best_model <- tune.out$best.model
+# summary(best_model) # 5 # using PC's also 5
+svmfit <- svm(candidate~., data=trn.cl, kernel="radial", cost=10, scale=T)
+predYtr <-  predict(svmfit, trn.cl)
+train.error =calc_error_rate(predYtr, trn.cl$candidate)
+predYtest <- predict(svmfit, tst.cl)
+test.error =calc_error_rate(predYtest, tst.cl$candidate)
+records[7,1] <- train.error
+records[7,2] <- test.error
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+``` {r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  svmfit <- svm(candidate~., data=data.frame(bootstrap1000[,i]),
+                kernel="radial", cost=10, scale=T)
+  predYtest <- predict(svmfit, tst.cl)
+  test.error.bootstrap$SVM[i] = calc_error_rate(predYtest, tst.cl$candidate)
+}
+```
+
+## Random forest
+```{r 20-1-5, warning=F, message=F, cache=T}
+set.seed(1)
+rf <- randomForest(factor(candidate) ~ ., data=trn.cl, ntree=500, importance=T) 
+varImpPlot(rf, sort=T, main="Variable importance for random forest", n.var=5)
+# prediction error
+predYtr <-  predict(rf, trn.cl)
+train.error =calc_error_rate(predYtr, factor(trn.cl$candidate))
+predYtest <- predict(rf, tst.cl)
+test.error =calc_error_rate(predYtest, factor(tst.cl$candidate))
+records[8,1] <- train.error
+records[8,2] <- test.error 
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+``` {r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  rf <- randomForest(factor(candidate) ~ ., data=data.frame(bootstrap1000[,i]),
+                     ntree=500, importance=T)
+  predYtest <- predict(rf, tst.cl)
+  test.error.bootstrap$`Random forest`[i] =
+    calc_error_rate(predYtest, factor(tst.cl$candidate))
+}
+```
+
+## Boosting
+```{r 20-1-6, warning=F, message=F, cache=T}
+set.seed(1)
+boost <- gbm(ifelse(candidate=="Hillary Clinton",1,0)~., data=trn.cl,
+             distribution="bernoulli", n.trees=500, interaction.depth=4)
+summary(boost)
+# prediction error
+predYtr <-  predict(boost, trn.cl, n.trees=500)
+train.error =calc_error_rate(ifelse(predYtr>0,1,0), 
+                              ifelse(trn.cl$candidate=="Hillary Clinton",1,0))
+predYtest <- predict(boost, tst.cl, n.trees=500)
+test.error =calc_error_rate(ifelse(predYtest>0,1,0), 
+                             ifelse(tst.cl$candidate=="Hillary Clinton",1,0))
+records[9,1] <- train.error
+records[9,2] <- test.error 
+kable(records)
+# save(records, file = "records.pc.RData")
+```
+
+Bootstrap for test error statistics (it might take a while to run, for runing this chunk set `eval=T`): 
+``` {r, eval=F, warning=F, message=F, cache=T}
+# bootstrap
+for (i in 1:n.bootstrap){
+  boost <- gbm(ifelse(candidate=="Hillary Clinton",1,0)~.,
+               data=data.frame(bootstrap1000[,i]),
+             distribution="bernoulli", n.trees=500, interaction.depth=4)
+  predYtest <- predict(boost, tst.cl, n.trees=500)
+  test.error.bootstrap$Boosting[i] =
+    calc_error_rate(ifelse(predYtest>0,1,0),
+                    ifelse(tst.cl$candidate=="Hillary Clinton",1,0))
+}
+# save the bootstrap test error 
+# save(test.error.bootstrap, file = "test.error.bootstrap.RData")
+```
+
+# Plot bootstrap test error
+```{r 20-2, warning=F, message=F, cache=T}
+load("~/Documents/2018 Fall/PSTAT 231/Homework/Final proj/test.error.bootstrap.RData")
+require(reshape2)
+ggplot(data = melt(test.error.bootstrap), aes(x=variable, y=value)) +
+  geom_boxplot(aes(fill=variable)) +
+  theme(text = element_text(size=8)) +
+  labs(x="Classifiers", y="Test error")
+```
+
+# "Purple" Counties
+```{r 20-3, warning=F, message=F, cache=T}
+# None...
+```
+
+# Linear regression on votes
+```{r 20-5, warning=F, message=F, cache=T}
+#  votes for Trump and Cliton (response)
+election.votes.clinton <- election %>% filter(candidate=="Hillary Clinton") 
+colnames(election.votes.clinton)[5] <- "Clinton.votes"
+election.votes.trump <- election %>% filter(candidate=="Donald Trump")
+colnames(election.votes.trump)[5] <- "Trump.votes"
+# combine Clinton and Trump votes
+tmpvotes <- election.votes.clinton %>% left_join(election.votes.trump,
+                                                 by=c("county","state"))
+tmpvotes <- tmpvotes[,c("state","county","Clinton.votes","Trump.votes")]
+# join 
+tmpvotes <- tmpvotes %>% 
+  mutate(state = state.name[match(state, state.abb)]) %>%       
+  mutate_at(vars(state, county), tolower) %>%                   
+  mutate(county = gsub(" county| columbia| city| parish", "", county))  
+
+tmpcensus <- census.ct %>% ungroup() %>% mutate_at(vars(State, County), tolower)
+
+election.votes <- tmpvotes %>%
+  left_join(tmpcensus, by = c("state"="State", "county"="County")) %>% 
+  na.omit
+election.votes <- left_join(election.votes, tmpwinner, 
+                            by=c("state", "county")) %>% na.omit
+election.votes <- election.votes[,-c(1:2,29,31:33)]
+
+# training and test dataset
+set.seed(10) 
+n <- nrow(election.votes)
+in.trn <- sample.int(n, 0.8*n) 
+trn.cl <- election.votes[ in.trn,]
+tst.cl <- election.votes[-in.trn,]
+
+# lm: votes for Hillary Clinton ~ predictors
+fit.lm.clinton <- lm(Clinton.votes~.-Trump.votes-candidate, 
+                     data=trn.cl)
+summary(fit.lm.clinton)
+# lm: votes for Donald Trump ~ predictors
+fit.lm.trump <- lm(Trump.votes~.-Clinton.votes-candidate, 
+                   data=trn.cl)
+summary(fit.lm.trump)
+
+# prediction error
+predYtr1 <-  predict(fit.lm.clinton)
+predYtr2 <-  predict(fit.lm.trump)
+predYtr <- ifelse(predYtr1>predYtr2,"Hillary Clinton","Donald Trump")
+train.error =calc_error_rate(predYtr, trn.cl$candidate)
+tst.cl$candidate <- factor(tst.cl$candidate)
+predYtest1 <- predict(fit.lm.clinton, tst.cl)
+predYtest2 <- predict(fit.lm.trump, tst.cl)
+predYtest <- ifelse(predYtest1>predYtest2,"Hillary Clinton","Donald Trump")
+test.error = calc_error_rate(predYtest, tst.cl$candidate)
+```
